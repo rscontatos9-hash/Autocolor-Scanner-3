@@ -436,6 +436,25 @@
 <div id="modalInfoCliente" class="modal-overlay"><div class="modal-card"><button class="close-modal" id="fecharModalBtn">&times;</button><h3 id="modalNomeCliente"></h3><div id="modalConteudoInfo" style="margin-top:14px"></div></div></div>
 
 <script>
+  // GERADOR DE BIP SONORO (AUDIO CONTEXT)
+  function emitirBipEstoque() {
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 587.33; // Nota D5 (alerta nítido)
+      gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.4);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.4);
+    } catch(e) {
+      // Caso o navegador bloqueie autoplay de áudio sem interação prévia
+    }
+  }
+
   function salvarArquivoDispositivo(blob, nomeArquivo) {
     try {
       if (navigator.canShare && blob.type.includes('text')) {}
@@ -458,7 +477,6 @@
     }
   }
 
-  // FUNÇÃO AUXILIAR PARA NORMALIZAR TEXTO (IGNORAR ACENTOS E MAIÚSCULAS/MINÚSCULAS)
   function normalizarTexto(texto) {
     if (!texto) return "";
     return texto.toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -525,7 +543,12 @@
   let estoque = JSON.parse(localStorage.getItem("premium_estoque_loja")) || [];
   let estoqueViewMode = "detailed";
   let activeCategoryFilter = "todas";
-  function salvarEstoque() { localStorage.setItem("premium_estoque_loja", JSON.stringify(estoque)); renderizarEstoque(); atualizarFiltrosCategoria(); atualizarSelectsEstoque(); }
+  function salvarEstoque() { 
+    localStorage.setItem("premium_estoque_loja", JSON.stringify(estoque)); 
+    renderizarEstoque(); 
+    atualizarFiltrosCategoria(); 
+    atualizarSelectsEstoque(); 
+  }
   function atualizarFiltrosCategoria() {
     const container = document.getElementById("categoryFilterContainer"); if(!container) return;
     const cats = [...new Set(estoque.map(p => p.categoria).filter(Boolean))];
@@ -538,13 +561,15 @@
     const container = document.getElementById("listaEstoque"); if(!container) return;
     let filtered = activeCategoryFilter === "todas" ? estoque : estoque.filter(p => p.categoria === activeCategoryFilter);
     if (!filtered.length) { container.innerHTML = '<div class="empty-msg">Nenhum produto encontrado</div>'; return; }
+    
+    let temEstoqueBaixo = false;
     container.innerHTML = "";
     filtered.forEach(function(item) {
       const originalIdx = estoque.findIndex(function(p) { return p.nome === item.nome && p.unidade === item.unidade; });
       const precoV = (item.precoVenda || item.precoCusto || 0).toFixed(2);
       
-      // Verifica se o estoque está acabando (<= 5 unidades)
       const estoqueBaixo = item.quantidade <= 5;
+      if (estoqueBaixo) temEstoqueBaixo = true;
       
       const div = document.createElement("div"); 
       div.className = "estoque-item" + (estoqueBaixo ? " alerta-baixo" : ""); 
@@ -558,6 +583,10 @@
       div.querySelector("[data-remover]").addEventListener("click", function() { removerProdutoEstoque(originalIdx); });
       container.appendChild(div);
     });
+
+    if (temEstoqueBaixo) {
+      emitirBipEstoque();
+    }
   }
   function alterarQuantidade(idx, delta) { let item = estoque[idx]; if(!item) return; let nova = item.quantidade + delta; if(nova < 0) return showToast("Qtd negativa", true); item.quantidade = nova; salvarEstoque(); showToast(item.nome + ': ' + (delta>0?'+':'') + delta); }
   function adicionarOuAtualizarEstoque() {
@@ -741,14 +770,33 @@
     const qtd = parseFloat(document.getElementById('vendaQtd').value); const preco = parseFloat(document.getElementById('vendaPreco').value);
     const data = document.getElementById('vendaData').value || new Date().toISOString().slice(0,10);
     if(isNaN(qtd) || qtd <= 0) return showToast("Quantidade inválida", true); if(isNaN(preco) || preco <= 0) return showToast("Preço unitário inválido", true);
+    
     const produtoEstoque = estoque.find(function(p){return normalizarTexto(p.nome) === normalizarTexto(produtoNome);}); if(!produtoEstoque) return showToast("Produto não encontrado no estoque", true);
     if(produtoEstoque.quantidade < qtd) return showToast('Estoque insuficiente. Disponível: ' + produtoEstoque.quantidade + ' ' + (produtoEstoque.unidade||'un'), true);
-    produtoEstoque.quantidade -= qtd; salvarEstoque();
+    
+    produtoEstoque.quantidade -= qtd; 
+    salvarEstoque();
+    
     let cliente = clientes.find(function(c){return c.id === clienteId;}); if(!cliente) return showToast("Cliente não encontrado", true);
-    const valorTotal = qtd * preco; cliente.produtos.push({ id: gerarId(), nome: produtoNome, qtd, preco, unidade: produtoEstoque.unidade||'un', totalItem: valorTotal, data });
-    recalcularDebitoCliente(cliente); saveData(); registrarVenda("crédito", cliente.nome, produtoNome, qtd, produtoEstoque.unidade||'un', valorTotal, data);
+    
+    // AGRUPAMENTO AUTOMÁTICO SE O MESMO PRODUTO JÁ ESTIVER NA LISTA DO CLIENTE
+    let itemExistente = cliente.produtos.find(function(p){ return normalizarTexto(p.nome) === normalizarTexto(produtoNome) && p.preco === preco; });
+    if(itemExistente) {
+      itemExistente.qtd += qtd;
+      itemExistente.totalItem = itemExistente.qtd * itemExistente.preco;
+      itemExistente.data = data;
+    } else {
+      const valorTotalItem = qtd * preco;
+      cliente.produtos.push({ id: gerarId(), nome: produtoNome, qtd, preco, unidade: produtoEstoque.unidade||'un', totalItem: valorTotalItem, data });
+    }
+
+    recalcularDebitoCliente(cliente); 
+    saveData(); 
+    registrarVenda("crédito", cliente.nome, produtoNome, qtd, produtoEstoque.unidade||'un', qtd * preco, data);
+    
     document.getElementById('vendaQtd').value = '1'; document.getElementById('vendaPreco').value = ''; document.getElementById('vendaProdutoSelect').value = '';
-    showToast('Venda: ' + produtoNome + ' (' + qtd + ' ' + (produtoEstoque.unidade||'un') + ') — R$ ' + valorTotal.toFixed(2)); atualizarClienteVendaUI();
+    showToast('Venda agrupada/lançada: ' + produtoNome + ' (' + qtd + ' ' + (produtoEstoque.unidade||'un') + ')'); 
+    atualizarClienteVendaUI();
   }
 
   function registrarPagamento() { let cid = document.getElementById('pagClienteSelect').value; if(!cid) return showToast("Selecione o cliente", true); let valor = parseFloat(document.getElementById('pagValor').value); if(isNaN(valor) || valor <= 0) return showToast("Valor inválido", true); let forma = document.getElementById('pagForma').value; let data = document.getElementById('pagData').value || new Date().toISOString().slice(0,10); let c = clientes.find(function(c){return c.id===cid;}); c.pagamentos.push({ id: gerarId(), valor, forma, data }); recalcularDebitoCliente(c); saveData(); document.getElementById('pagValor').value = ''; showToast('Pagamento R$ ' + valor.toFixed(2) + ' registrado'); if(confirm("Enviar agradecimento no WhatsApp de " + c.nome + "?")){ enviarWhatsApp(c.id, "agradecimento"); } if(clienteSelecionadoId===cid) atualizarClienteVendaUI(); atualizarHistoricoPagamentosUI(); }
@@ -783,9 +831,54 @@
   function mostrarHistoricoGeralPagamentos() { let todos = []; clientes.forEach(function(c) { (c.pagamentos||[]).forEach(function(p) { todos.push({ clienteNome: c.nome, valor: p.valor, forma: p.forma, data: p.data }); }); }); if(!todos.length) { document.getElementById('conteudoHistoricoGeral').innerHTML = '<div class="empty-msg">Nenhum pagamento registrado</div>'; } else { todos.sort(function(a,b) { return new Date(b.data)-new Date(a.data); }); document.getElementById('conteudoHistoricoGeral').innerHTML = todos.map(function(p) { return '<div class="historico-item"><div class="flex-between"><strong>' + escapeHtml(p.clienteNome) + '</strong><span style="font-weight:700">R$ ' + p.valor.toFixed(2) + '</span></div><div style="font-size:0.8rem;color:#475569">' + p.forma + ' | ' + p.data + '</div></div>'; }).join(''); } document.getElementById('modalHistoricoGeral').classList.add('active'); }
 
   let carrinhoItens = [];
-  function adicionarItemCompra() { const produtoNome = document.getElementById("calcProdutoSelect").value; if(!produtoNome) return showToast("Selecione um produto", true); const qtd = parseFloat(document.getElementById("calcQuantidade").value); const preco = parseFloat(document.getElementById("calcPrecoUnitario").value); if(isNaN(qtd) || qtd <= 0) return showToast("Quantidade inválida", true); if(isNaN(preco) || preco <= 0) return showToast("Preço inválido", true); const produtoEstoque = estoque.find(function(p){return normalizarTexto(p.nome) === normalizarTexto(produtoNome);}); if(!produtoEstoque) return showToast("Produto não encontrado", true); if(produtoEstoque.quantidade < qtd) return showToast("Estoque insuficiente", true); carrinhoItens.push({ nome: produtoNome, quantidade: qtd, precoUnitario: preco, unidade: produtoEstoque.unidade||'un' }); atualizarCarrinhoUI(); document.getElementById("calcQuantidade").value = "1"; document.getElementById("calcPrecoUnitario").value = ""; document.getElementById("calcProdutoSelect").value = ""; }
+  function adicionarItemCompra() { 
+    const produtoNome = document.getElementById("calcProdutoSelect").value; 
+    if(!produtoNome) return showToast("Selecione um produto", true); 
+    const qtd = parseFloat(document.getElementById("calcQuantidade").value); 
+    const preco = parseFloat(document.getElementById("calcPrecoUnitario").value); 
+    if(isNaN(qtd) || qtd <= 0) return showToast("Quantidade inválida", true); 
+    if(isNaN(preco) || preco <= 0) return showToast("Preço inválido", true); 
+    
+    const produtoEstoque = estoque.find(function(p){return normalizarTexto(p.nome) === normalizarTexto(produtoNome);}); 
+    if(!produtoEstoque) return showToast("Produto não encontrado", true); 
+    if(produtoEstoque.quantidade < qtd) return showToast("Estoque insuficiente", true); 
+    
+    // AGRUPAMENTO AUTOMÁTICO NO CARRINHO À VISTA
+    let itemExistente = carrinhoItens.find(function(i){ return normalizarTexto(i.nome) === normalizarTexto(produtoNome) && i.precoUnitario === preco; });
+    if(itemExistente) {
+      itemExistente.quantidade += qtd;
+    } else {
+      carrinhoItens.push({ nome: produtoNome, quantidade: qtd, precoUnitario: preco, unidade: produtoEstoque.unidade||'un' }); 
+    }
+
+    atualizarCarrinhoUI(); 
+    document.getElementById("calcQuantidade").value = "1"; 
+    document.getElementById("calcPrecoUnitario").value = ""; 
+    document.getElementById("calcProdutoSelect").value = ""; 
+  }
+
   function atualizarCarrinhoUI() { const container = document.getElementById("carrinhoCompra"); if(!container) return; if(!carrinhoItens.length) { container.innerHTML = '<div class="empty-msg">Nenhum item adicionado</div>'; document.getElementById("totalCompra").innerText = "R$ 0,00"; return; } let total = 0, html = ''; carrinhoItens.forEach(function(item, idx) { const sub = item.quantidade * item.precoUnitario; total += sub; html += '<div class="produto-card"><div class="flex-between"><span><strong>' + escapeHtml(item.nome) + '</strong> | ' + item.quantidade + ' ' + item.unidade + ' x R$ ' + item.precoUnitario.toFixed(2) + '</span><span>R$ ' + sub.toFixed(2) + ' <button class="btn-danger btn-sm" data-remove="' + idx + '"><i class="fas fa-trash"></i></button></span></div></div>'; }); container.innerHTML = html; document.getElementById("totalCompra").innerText = 'R$ ' + total.toFixed(2); container.querySelectorAll("[data-remove]").forEach(function(btn) { btn.addEventListener("click", function() { carrinhoItens.splice(parseInt(btn.dataset.remove),1); atualizarCarrinhoUI(); }); }); }
-  function finalizarCompra() { if(!carrinhoItens.length) return showToast("Adicione itens", true); const dataAtual = new Date().toISOString().slice(0,10); let totalGeral = 0; for(let i = 0; i < carrinhoItens.length; i++) { let item = carrinhoItens[i]; let prodIdx = estoque.findIndex(function(p){return normalizarTexto(p.nome) === normalizarTexto(item.nome);}); if(prodIdx === -1) { showToast('Produto "' + item.nome + '" não encontrado', true); return; } if(estoque[prodIdx].quantidade < item.quantidade) { showToast("Estoque insuficiente", true); return; } estoque[prodIdx].quantidade -= item.quantidade; let valorItem = item.quantidade * item.precoUnitario; totalGeral += valorItem; registrarVenda("à vista", "Cliente Avulso", item.nome, item.quantidade, item.unidade, valorItem, dataAtual); } salvarEstoque(); carrinhoItens = []; atualizarCarrinhoUI(); showToast('Compra finalizada! Total: R$ ' + totalGeral.toFixed(2)); }
+  
+  function finalizarCompra() { 
+    if(!carrinhoItens.length) return showToast("Adicione itens", true); 
+    const dataAtual = new Date().toISOString().slice(0,10); 
+    let totalGeral = 0; 
+    for(let i = 0; i < carrinhoItens.length; i++) { 
+      let item = carrinhoItens[i]; 
+      let prodIdx = estoque.findIndex(function(p){return normalizarTexto(p.nome) === normalizarTexto(item.nome);}); 
+      if(prodIdx === -1) { showToast('Produto "' + item.nome + '" não encontrado', true); return; } 
+      if(estoque[prodIdx].quantidade < item.quantidade) { showToast("Estoque insuficiente", true); return; } 
+      estoque[prodIdx].quantidade -= item.quantidade; 
+      let valorItem = item.quantidade * item.precoUnitario; 
+      totalGeral += valorItem; 
+      registrarVenda("à vista", "Cliente Avulso", item.nome, item.quantidade, item.unidade, valorItem, dataAtual); 
+    } 
+    salvarEstoque(); 
+    carrinhoItens = []; 
+    atualizarCarrinhoUI(); 
+    showToast('Compra finalizada! Total: R$ ' + totalGeral.toFixed(2)); 
+  }
+
   function calcularPrecoVenda() {
     const custo = parseFloat(document.getElementById("precoCusto").value) || 0; const frete = parseFloat(document.getElementById("precoFrete").value) || 0;
     const impostosPct = parseFloat(document.getElementById("precoImpostos").value) || 0; const comissaoPct = parseFloat(document.getElementById("precoComissao").value) || 0;
